@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>{% if page.title %} {{ page.title}} | {% endif %} {{ site.title }}</title>
+    <meta name="description" content="">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% assign csses = page.require.css | split:',' %}
+    {% for filename in csses %}
+      <link rel="stylesheet" href="{{site.github.url}}/{{ filename }}">
+    {% endfor %}
+    <link rel="stylesheet" href="style.css">
+    <script src="{{site.github.url}}/reveal.js/lib/js/head.min.js"></script>
+  </head>
+  <body>
+    {{content}}
+    {% assign scripts = page.require.javascript | split:',' %}
+    {% for filename in scripts %}
+      <script src="{{site.github.url}}/{{ filename }}"></script>
+    {% endfor %}
+  </body>
+</html>

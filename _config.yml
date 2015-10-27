@@ -1,0 +1,6 @@
+title : DNS and Amazon Web Services Route 53
+collections:
+  slides:
+    ouput : false
+exclude:
+  - outline.org
