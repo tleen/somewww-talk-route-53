@@ -1,0 +1,183 @@
+#!/usr/bin/env node
+
+
+// Setup demo servers + dns entries on AWS
+
+// Local Variables:
+// mode: javascript
+// End:
+
+// config file '.configuration.json' must be in project root &
+// looks like this, sub your own values as needed:
+
+/*
+{
+  "region": "us-east-1",
+  "ec2": {
+    "type": "t2.micro",
+    "image": "ami-e3106686",
+    "count": 2,
+    "key": "dns-demo",
+    "securityGroup": "dns-demo-webserver",
+    "vpc": {
+      "id": "vpc-4eed442a",
+      "group": {
+	"id": "sg-4984222f"
+      },
+      "subnet": {
+	"id": "subnet-068e6270"
+      }
+    }
+  },
+  "dns": {
+    "zone": {
+      "id": "Z1LWS67LBR9Q9O"
+    },
+    "name": {
+      "robin" : "robin.dns.testaddress.org.",
+      "weighted" : "weighted.dns.testaddress.org."
+    }
+  }
+}
+*/
+
+var aws = require('aws-sdk'),
+    c = require('../.configuration.json'),
+    fs = require('fs'),
+    spinner = require('cli-spinner'),
+    _ = require('lodash');
+
+// dryRun command line option just for the ec2 creation
+var args = require('minimist')(process.argv.slice(2), {
+  boolean : ['dryRun'],
+  default : {
+    dryRun : false
+  }  
+});
+
+// for some reason you have to set the region explicitly
+// here and not rely on your default creds
+aws.config.update({
+  region: c.region
+});
+
+// this script will be used to setup the demo servers
+// install http server + utilities and set the default doc as a
+// message with the public ip
+var userData = fs.readFileSync(__dirname + '/start-demo-user-data.sh', 'base64');
+var ec2 = new aws.EC2();
+
+// start ec2 instances
+ec2.runInstances({
+  DryRun: args.dryRun,
+  ImageId: c.ec2.image,
+  MaxCount: c.ec2.count,
+  MinCount: 1,
+  InstanceType: c.ec2.type,
+  KeyName: c.ec2.key,
+  Monitoring: {
+    Enabled: false
+  },
+  NetworkInterfaces: [
+    {
+      AssociatePublicIpAddress: true,
+      DeleteOnTermination: true,
+      DeviceIndex: 0,
+      Groups: [c.ec2.vpc.group.id],
+      SubnetId: c.ec2.vpc.subnet.id
+    }
+  ],
+  UserData: userData
+}, function(err, data){
+  if(err){
+    console.log(err);
+    return;
+  }
+
+  // make an array of ec2 instance identifiers
+  var instanceIds = _.map(data.Instances, 'InstanceId');
+
+  // add tags to the ec2 instances
+  ec2.createTags({
+    Resources: instanceIds,
+    Tags: [
+      { Key: 'Name', Value: 'Dns Demo Server' },
+      { Key: 'Purpose', Value: 'dns-demo' }
+    ]
+  }, function(err, data){
+    if(err) console.log(err);
+  });
+  
+  // start a visual spinner on the cli
+  var spin = new spinner.Spinner('waiting for instances...');
+  spin.start();
+  // ...and wait for the instances to actually get going
+  // only then can we be sure to get the public IP(s) off of them
+  ec2.waitFor(
+    'instanceRunning',
+    { InstanceIds: instanceIds },
+    function(err, data){
+      spin.stop();
+      if(err) return console.log(err);
+      // get ips & stick in structure to use later
+      var ips = _.map(data.Reservations[0].Instances, function(i){
+	return {
+	  id : i.InstanceId,
+	  ip : i.PublicIpAddress,
+	  name : i.PublicDnsName 
+	}
+      });
+      
+      var route53 = new aws.Route53();
+
+      // create a changes array of change objects used to
+      // batch a bunch of DNS changes at once
+      
+      // start changeset with round robin A record
+      var changes = [
+	{
+	  Action: 'UPSERT',
+	  ResourceRecordSet: {
+	    Name: c.dns.name.robin,
+	    Type: 'A',
+	    ResourceRecords : _.map(ips, function(data){ return {Value: data.ip} }),
+	    TTL: 60
+	  }
+	}
+      ];
+
+      // add weighted individual records
+      ips.forEach(function(data, index){
+	changes.push(	{
+	  Action: 'UPSERT',
+	  ResourceRecordSet: {
+	    Name: c.dns.name.weighted,
+	    Type: 'A',
+	    ResourceRecords : [{Value: data.ip}],
+	    TTL: 60,
+	    Weight: (10 + (index * 10)),
+	    SetIdentifier: ('Weighted DNS example set ' + index)
+	  }
+	});
+      });
+
+      // actually transmit those changes
+      route53.changeResourceRecordSets({
+	HostedZoneId: c.dns.zone.id,
+	ChangeBatch: {
+	  Changes: changes
+	}
+      }, function(err, data){
+	if(err) return console.log(err);
+	console.log('created:', c.dns.name);
+	console.log(ips);
+
+	// changes will take time to propigate
+	// can poll here to wait for changes
+
+	// also if wanted to add health checks to the weighted
+	// records this is the place to do it
+      });
+    });  
+});
+
